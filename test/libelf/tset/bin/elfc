@@ -108,15 +108,14 @@ class ElfError(Exception):
     def __str__(self):
         """Form a printable representation of an exception."""
 
-        if self.ee_start != -1:
-            if self.ee_start == self.ee_end:
-                return "Error: line {start}: {msg}".format(
-                    start=self.ee_start, end=self.ee_msg)
-            else:
-                return "Error: lines {start}--{end}: {msg}".format(
-                    start=self.ee_start, end=self.ee_end, msg=self.ee_msg)
-        else:
+        if self.ee_start == -1:
             return "Error: {msg}".format(msg=self.ee_msg)
+        if self.ee_start == self.ee_end:
+            return "Error: line {start}: {msg}".format(
+                start=self.ee_start, end=self.ee_msg)
+        else:
+            return "Error: lines {start}--{end}: {msg}".format(
+                start=self.ee_start, end=self.ee_end, msg=self.ee_msg)
 
 
 #
@@ -571,11 +570,7 @@ def encode_flags(flags, m):
 
 def check_dict(d, l, node=None):
     """Check a dictionary for unknown keys."""
-    unknown = []
-    for k in d.keys():
-        if k not in l:
-            unknown.append(k)
-    if len(unknown) > 0:
+    if unknown := [k for k in d.keys() if k not in l]:
         raise ElfError(node, "{tag} Unknown key(s) {key}".format(
             tag=node.tag, key=unknown))
 
@@ -626,8 +621,11 @@ class ElfStrTab:
 
         # Prepare the string table, ordered by string offset.
         ls = [b""]  # initial NUL
-        for (ss, oo) in sorted(self.htab.items(), key=operator.itemgetter(1)):
-            ls.append(bytes(ss, 'utf-8'))
+        ls.extend(
+            bytes(ss, 'utf-8')
+            for ss, oo in sorted(self.htab.items(), key=operator.itemgetter(1))
+        )
+
         return b"\000".join(ls) + b"\000"  # Add trailing NULs
 
     def lookup(self, str):
@@ -692,20 +690,14 @@ class ElfType:
     def formatstring(self, elfclass):
         """Return the format string for this type."""
 
-        if elfclass == ELFCLASS32:
-            n = 2
-        else:
-            n = 3
+        n = 2 if elfclass == ELFCLASS32 else 3
         return "".join([t[n] for t in self.fields])
 
     def content(self, elfclass):
         """Return a tuple containing the values for an ELF type."""
 
         a = []
-        if elfclass == ELFCLASS32:
-            n = 2
-        else:
-            n = 3
+        n = 2 if elfclass == ELFCLASS32 else 3
         for t in self.fields:
             field_encoding = t[n]
             if field_encoding != "":
@@ -746,9 +738,7 @@ class ElfType:
                 sz += 4
             elif f == "Q":
                 sz += 8
-            elif f == "":
-                pass
-            else:
+            elif f != "":
                 raise TypeError("Invalid format char {char!r}.".format(char=f))
         return sz
 
@@ -761,26 +751,19 @@ class ElfType:
 def do_string(d, n):
     """Convert a YAML value to a Python string."""
 
-    v = get(d, n, defaults[n])
-    if v:
-        return str(v)
-    return v
+    return str(v) if (v := get(d, n, defaults[n])) else v
 
 
 def do_long(d, n):
     """Convert a YAML value to a Python 'long'."""
 
-    v = get(d, n, defaults[n])
-    if v:
-        return int(v)
-    return v
+    return int(v) if (v := get(d, n, defaults[n])) else v
 
 
 def do_copy(d, n):
     """Copy a YAML value without conversion."""
 
-    v = get(d, n, defaults[n])
-    return v
+    return get(d, n, defaults[n])
 
 
 def do_encode(xlate):
@@ -853,7 +836,7 @@ class ElfEhdrIdent(ElfType):
     def bits(self, format, elfclass):
         f, args = self.getfields(elfclass)
         s = b"\x7FELF"
-        s += struct.pack(f + 'xxxxxxx', *args)
+        s += struct.pack(f'{f}xxxxxxx', *args)
         return s
 
 
@@ -919,23 +902,17 @@ class ElfEhdr(ElfType):
         if self.e_phnum is None:
             self.e_phnum = len(elf.elf_phdrtab)
 
-        # Compute a value for the e_phentsize field.
         if self.e_phentsize is None:
-            if self.e_phnum:
-                self.e_phentsize = e_phentsize
-            else:
-                self.e_phentsize = 0
-
+            self.e_phentsize = e_phentsize if self.e_phnum else 0
         # Set the e_shentsize field.
         if self.e_shentsize is None:
             self.e_shentsize = e_shentsize
 
-        # The program header defaults to just after the ELF header.
         if self.e_phoff is None:
             if self.e_phnum > 0:
                 self.e_phoff = \
-                      (self.e_ehsize + (alignment - 1)) & \
-                    ~(alignment - 1)
+                          (self.e_ehsize + (alignment - 1)) & \
+                        ~(alignment - 1)
             else:
                 self.e_phoff = 0
 
@@ -946,10 +923,8 @@ class ElfEhdr(ElfType):
                 self.e_shstrndx = '.shstrtab'
             if isinstance(self.e_shstrndx, str):
                 self.e_shstrndx = \
-                  elf.elf_sections.get_index(self.e_shstrndx)
-            elif isinstance(self.e_shstrndx, int):
-                pass
-            else:
+                      elf.elf_sections.get_index(self.e_shstrndx)
+            elif not isinstance(self.e_shstrndx, int):
                 raise ElfError(
                     self._n,
                     "Unparseable e_shstrndx field: {v!r}".format(
@@ -957,10 +932,9 @@ class ElfEhdr(ElfType):
             if self.e_shstrndx is None:
                 raise ElfError(self._n,
                         'Cannot determine section ' + \
-                        'name string table index: {v!r}'.format(v=self.e_shstrndx))
-        else:
-            if self.e_shstrndx is None:
-                self.e_shstrndx = 0
+                            'name string table index: {v!r}'.format(v=self.e_shstrndx))
+        elif self.e_shstrndx is None:
+            self.e_shstrndx = 0
 
         if self.e_shnum is None:
             self.e_shnum = self.nsections
@@ -976,7 +950,7 @@ class ElfEhdr(ElfType):
         if self.e_shoff is None:
             if self.nsections > 0:
                 self.e_shoff = (offset + (alignment-1)) & \
-                       ~(alignment-1)
+                           ~(alignment-1)
             else:
                 self.e_shoff = 0
 
@@ -1010,10 +984,7 @@ class ElfLong:
         8 bytes wide.
         """
 
-        if self._v > 0xFFFFFFFF:
-            f = formatchar + "Q"
-        else:
-            f = formatchar + "I"
+        f = f"{formatchar}Q" if self._v > 0xFFFFFFFF else f"{formatchar}I"
         return struct.pack(f, self._v)
 
 
@@ -1109,11 +1080,12 @@ class ElfPhdr(ElfType):
     def to_string(self):
         """Helper during debugging."""
 
-        s = "Phdr(type:%(p_type)d,flags:%(p_flags)d," \
-         "offset:%(p_offset)ld,vaddr:%(p_vaddr)ld," \
-         "paddr:%(p_paddr)ld,filesz:%(p_filesz)ld," \
-         "memsz:%(p_memsz)ld)" % self
-        return s
+        return (
+            "Phdr(type:%(p_type)d,flags:%(p_flags)d,"
+            "offset:%(p_offset)ld,vaddr:%(p_vaddr)ld,"
+            "paddr:%(p_paddr)ld,filesz:%(p_filesz)ld,"
+            "memsz:%(p_memsz)ld)" % self
+        )
 
     def bits(self, formatchar, elfclass):
         """Return the file representation of a Phdr."""
@@ -1122,15 +1094,31 @@ class ElfPhdr(ElfType):
         # Phdr structures are laid out in a class-dependent way
         if elfclass == ELFCLASS32:
             f += "IIIIIIII"
-            s = struct.pack(f, self.p_type, self.p_offset, self.p_vaddr,
-                            self.p_paddr, self.p_filesz, self.p_memsz,
-                            self.p_flags, self.p_align)
+            return struct.pack(
+                f,
+                self.p_type,
+                self.p_offset,
+                self.p_vaddr,
+                self.p_paddr,
+                self.p_filesz,
+                self.p_memsz,
+                self.p_flags,
+                self.p_align,
+            )
+
         else:
             f += "IIQQQQQQ"
-            s = struct.pack(f, self.p_type, self.p_flags, self.p_offset,
-                            self.p_vaddr, self.p_paddr, self.p_filesz,
-                            self.p_memsz, self.p_align)
-        return s
+            return struct.pack(
+                f,
+                self.p_type,
+                self.p_flags,
+                self.p_offset,
+                self.p_vaddr,
+                self.p_paddr,
+                self.p_filesz,
+                self.p_memsz,
+                self.p_align,
+            )
 
 
 class ElfRel(ElfType):
@@ -1206,15 +1194,11 @@ class ElfSection(ElfType):
         if not isinstance(self.sh_data, list):
             self.sh_data = list(self.sh_data)
         if self.sh_addralign is None:
-            if self.sh_type == SHT_NULL or self.sh_type == SHT_NOBITS:
-                self.sh_addralign = 0
-            else:
-                self.sh_addralign = 1
-        else:
-            if (self.sh_addralign == 0 or \
-             (self.sh_addralign & (self.sh_addralign - 1)) != 0):
-                raise ElfError(node, "'sh_addralign' not a power of two.")
-        if self.sh_word_size != 32 and self.sh_word_size != 64:
+            self.sh_addralign = 0 if self.sh_type in [SHT_NULL, SHT_NOBITS] else 1
+        elif (self.sh_addralign == 0 or \
+                 (self.sh_addralign & (self.sh_addralign - 1)) != 0):
+            raise ElfError(node, "'sh_addralign' not a power of two.")
+        if self.sh_word_size not in [32, 64]:
             raise ElfError(
                 node,
                 "unsupported 'sh_word_size' value: {v!r}".format(
@@ -1261,7 +1245,7 @@ class ElfSection(ElfType):
             except ValueError:  # lookup in string table
                 try:
                     self.sh_name = \
-                        elf.section_name_index(self.sh_name)
+                            elf.section_name_index(self.sh_name)
                 except KeyError:
                     raise ElfError(
                         self._n,
@@ -1277,25 +1261,13 @@ class ElfSection(ElfType):
         align = self.sh_addralign
         if align == 0:
             align = 1
-        if self.sh_type == SHT_NULL or self.sh_type == SHT_NOBITS:
-            isnulltype = 1
-        else:
-            isnulltype = 0
-
+        isnulltype = 1 if self.sh_type in [SHT_NULL, SHT_NOBITS] else 0
         offset = (offset + (align - 1)) & ~(align - 1)
         if self.sh_size is None:
-            if isnulltype:
-                self.sh_size = 0
-            else:
-                self.sh_size = len(self._data)
+            self.sh_size = 0 if isnulltype else len(self._data)
         if self.sh_offset is None:
-            if isnulltype:
-                self.sh_offset = 0
-            else:
-                self.sh_offset = offset
-        if isnulltype:  # ignore bits for null types
-            return offset
-        return offset + len(self._data)
+            self.sh_offset = 0 if isnulltype else offset
+        return offset if isnulltype else offset + len(self._data)
 
     def databits(self, formatchar, elfclass):
         """Return the contents of a section."""
@@ -1347,15 +1319,27 @@ class ElfSym(ElfType):
     def bits(self, format, elfclass):
         """Return the file representation for an ELF Sym."""
 
-        if elfclass == ELFCLASS32:
-            s = struct.pack(format + "IIIBBH", self.st_name, self.st_value,
-                            self.st_size, self.st_info, self.st_other,
-                            self.st_shndx)
-        else:
-            s = struct.pack(format + "IBBHQQ", self.st_name, self.st_info,
-                            self.st_other, self.st_shndx, self.st_value,
-                            self.st_size)
-        return s
+        return (
+            struct.pack(
+                f"{format}IIIBBH",
+                self.st_name,
+                self.st_value,
+                self.st_size,
+                self.st_info,
+                self.st_other,
+                self.st_shndx,
+            )
+            if elfclass == ELFCLASS32
+            else struct.pack(
+                f"{format}IBBHQQ",
+                self.st_name,
+                self.st_info,
+                self.st_other,
+                self.st_shndx,
+                self.st_value,
+                self.st_size,
+            )
+        )
 
     def layout(self, offset, elf):
         """Perform layout-time conversions for an ELF Sym.
@@ -1497,10 +1481,7 @@ class ElfPhdrTable:
     def bits(self, formatchar, elfclass):
         """Return the file representation of the Phdr table."""
 
-        s = ""
-        for d in self.pht_data:
-            s += d.bits(formatchar, elfclass)
-        return s
+        return "".join(d.bits(formatchar, elfclass) for d in self.pht_data)
 
     def __len__(self):
         """Return the number of program header table entries."""
@@ -1531,9 +1512,8 @@ class ElfSectionList:
             if not isinstance(sh, ElfSection):
                 raise ElfError(None, """Section 'sections' contains
                            unrecognized data.""")
-            if sh.sh_index is not None:
-                if self.shl_nentries <= sh.sh_index:
-                    self.shl_nentries = sh.sh_index + 1
+            if sh.sh_index is not None and self.shl_nentries <= sh.sh_index:
+                self.shl_nentries = sh.sh_index + 1
             self.shl_sectionnames.append((sh.sh_name, sh.sh_index))
             if sh.sh_type == SHT_STRTAB:  # a string table
                 sh.make_strtab()
@@ -1571,15 +1551,14 @@ class ElfSectionList:
     def get_index(self, name):
         """Return the section index for section 'name', or 'None'."""
 
-        c = 0
-        for (n, i) in self.shl_sectionnames:
-            if n == name:
-                if i is None:
-                    return c
-                else:
-                    return i
-            c += 1
-        return None
+        return next(
+            (
+                c if i is None else i
+                for c, (n, i) in enumerate(self.shl_sectionnames)
+                if n == name
+            ),
+            None,
+        )
 
     def get_shnum(self):
         """Retrieve the number of sections in this container."""
@@ -1623,10 +1602,7 @@ class Elf:
         """Return the format character corresponding to the ELF
         byteorder."""
 
-        if self.byteorder() == ELFCLASS32:
-            return "<"
-        else:
-            return ">"
+        return "<" if self.byteorder() == ELFCLASS32 else ">"
 
     def layout(self):
         """Compute a file layout for this ELF object and update
@@ -1664,7 +1640,7 @@ class Elf:
         if self.elf_sections:
             # First the contents of the sections
             for sh in self.elf_sections:
-                if sh.sh_type == SHT_NULL or sh.sh_type == SHT_NOBITS:
+                if sh.sh_type in [SHT_NULL, SHT_NOBITS]:
                     continue
                 self.reposition(of, sh.sh_offset)
                 of.write(sh.databits(formatchar, elfclass))
@@ -1673,7 +1649,7 @@ class Elf:
             for sh in self.elf_sections:
                 if sh.sh_index:
                     new_offset = sh.sh_index * self.elf_ehdr.e_shentsize + \
-                     self.elf_ehdr.e_shoff
+                         self.elf_ehdr.e_shoff
                     self.reposition(of, new_offset)
                 of.write(sh.headerbits(formatchar, elfclass))
         of.close()
@@ -1778,10 +1754,7 @@ if __name__ == '__main__':
         parser.error("only one input-file must be specified")
 
     try:
-        if args:
-            stream = io.open(args[0], 'r')
-        else:
-            stream = sys.stdin
+        stream = io.open(args[0], 'r') if args else sys.stdin
     except IOError as err:
         parser.error("cannot open stream: {err}".format(err=err))
 
